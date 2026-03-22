@@ -24,7 +24,7 @@ juce_add_plugin(CrushClone
     NEEDS_MIDI_OUTPUT        FALSE
     IS_MIDI_EFFECT           FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    COPY_PLUGIN_AFTER_BUILD  TRUE                 # auto-install after build
+    COPY_PLUGIN_AFTER_BUILD  FALSE                 # auto-install after build
     VST3_COPY_DIR            "/Library/Audio/Plug-Ins/VST3"
     AU_COPY_DIR              "$ENV{HOME}/Library/Audio/Plug-Ins/Components"
 )
