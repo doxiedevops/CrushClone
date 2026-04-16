@@ -6,7 +6,7 @@ include(FetchContent)
 FetchContent_Declare(
     JUCE
     GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-    GIT_TAG        master          # pin to a release tag for reproducibility
+    GIT_TAG        8.0.12          # pinned to stable release for reproducibility
     GIT_SHALLOW    TRUE
 )
 FetchContent_MakeAvailable(JUCE)

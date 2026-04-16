@@ -74,8 +74,12 @@ CrushCloneEditor::CrushCloneEditor (CrushCloneProcessor& p)
     };
 
     // ── Write HTML to temp file and load ─────────────────────────────────
-    htmlFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
-                   .getChildFile ("crushclone_ui.html");
+    // Use a unique subdirectory to prevent symlink/TOCTOU attacks on
+    // multi-user systems (predictable temp paths are a security risk).
+    auto tempDir = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                       .getChildFile ("crushclone_" + juce::String (juce::Random::getSystemRandom().nextInt64()));
+    tempDir.createDirectory();
+    htmlFile = tempDir.getChildFile ("crushclone_ui.html");
     htmlFile.replaceWithData (WebUIData::crushclone_html, WebUIData::crushclone_htmlSize);
     browser.goToURL ("file://" + htmlFile.getFullPathName());
 
@@ -85,18 +89,25 @@ CrushCloneEditor::CrushCloneEditor (CrushCloneProcessor& p)
 CrushCloneEditor::~CrushCloneEditor()
 {
     stopTimer();
+    auto parentDir = htmlFile.getParentDirectory();
     htmlFile.deleteFile();
+    parentDir.deleteRecursively();
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
 // Push parameter values from C++ to JS
 // ═════════════════════════════════════════════════════════════════════════════
 
+static juce::String escapeForJS (const juce::String& s)
+{
+    return s.replace ("\\", "\\\\").replace ("'", "\\'");
+}
+
 void CrushCloneEditor::pushParamToJS (const juce::String& id, float value)
 {
     if (! uiReady) return;
 
-    auto js = "window.setPluginParam('" + id + "'," + juce::String (value, 4) + ")";
+    auto js = "window.setPluginParam('" + escapeForJS (id) + "'," + juce::String (value, 4) + ")";
     browser.evaluateJavascript (js, nullptr);
 }
 
