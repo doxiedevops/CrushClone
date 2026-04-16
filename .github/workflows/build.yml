@@ -5,7 +5,12 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  workflow_dispatch:  # allows manual trigger from GitHub UI
+  workflow_dispatch:
+
+# Cancel in-progress runs for the same branch/PR to save runner minutes
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
 
@@ -18,13 +23,29 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Set up ccache
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: macos-universal-ccache
+          max-size: 500M
+
+      - name: Cache CMake FetchContent (JUCE)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: macos-deps-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            macos-deps-
+
       - name: Configure CMake
         run: |
           cmake -B build \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
             -DCMAKE_OSX_DEPLOYMENT_TARGET="13.0" \
-            -DCOPY_PLUGIN_AFTER_BUILD=FALSE
+            -DCOPY_PLUGIN_AFTER_BUILD=FALSE \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
       - name: Build
         run: cmake --build build --config Release -j$(sysctl -n hw.ncpu)
@@ -36,27 +57,23 @@ jobs:
           echo "=== AU ==="
           file build/CrushClone_artefacts/Release/AU/CrushClone.component/Contents/MacOS/CrushClone
 
-      - name: Package VST3
+      - name: Package artifacts
         run: |
-          cd build/CrushClone_artefacts/Release/VST3
-          zip -r ../../../../CrushClone-macOS-VST3.zip CrushClone.vst3
-
-      - name: Package AU
-        run: |
-          cd build/CrushClone_artefacts/Release/AU
-          zip -r ../../../../CrushClone-macOS-AU.zip CrushClone.component
+          cd build/CrushClone_artefacts/Release
+          zip -r ../../../CrushClone-macOS-VST3.zip VST3/CrushClone.vst3
+          zip -r ../../../CrushClone-macOS-AU.zip AU/CrushClone.component
 
       - name: Upload macOS VST3
         uses: actions/upload-artifact@v4
         with:
           name: CrushClone-macOS-VST3
-          path: build/CrushClone-macOS-VST3.zip
+          path: CrushClone-macOS-VST3.zip
 
       - name: Upload macOS AU
         uses: actions/upload-artifact@v4
         with:
           name: CrushClone-macOS-AU
-          path: build/CrushClone-macOS-AU.zip
+          path: CrushClone-macOS-AU.zip
 
   # ═══════════════════════════════════════════════════════════════════════════
   # Windows — x64
@@ -67,11 +84,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Cache CMake FetchContent (JUCE)
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: windows-deps-${{ hashFiles('CMakeLists.txt') }}
+          restore-keys: |
+            windows-deps-
+
       - name: Configure CMake
         run: cmake -B build -G "Visual Studio 17 2022" -A x64
 
       - name: Build
-        run: cmake --build build --config Release
+        run: cmake --build build --config Release --parallel
 
       - name: Package VST3
         run: Compress-Archive -Path "build\CrushClone_artefacts\Release\VST3\CrushClone.vst3" -DestinationPath "CrushClone-Windows-VST3.zip"
