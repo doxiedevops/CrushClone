@@ -1,0 +1,272 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# CrushClone — Build & Release
+#
+# Triggers
+#   • push to a vX.Y.Z tag  → builds both platforms and publishes a release
+#   • workflow_dispatch      → same, but you supply the version manually
+#
+# Outputs
+#   macOS : CrushClone-vX.Y.Z-macOS.pkg   (VST3 + AU, Universal Binary)
+#   Windows: CrushClone-vX.Y.Z-Windows.exe (VST3 64-bit, NSIS installer)
+#
+# Secrets required
+#   RELEASES_PAT  — GitHub Personal Access Token (repo scope) for the
+#                   *public* doxiedevops/CrushClone-releases repo
+#
+# Optional secrets (code-signing / notarization — safe to omit)
+#   macOS signing  : APPLE_DEVELOPER_ID_CERT (base64 .p12)
+#                    APPLE_DEVELOPER_ID_CERT_PASSWORD
+#                    APPLE_TEAM_ID
+#   macOS notarize : APPLE_ID  APPLE_APP_PASSWORD  APPLE_TEAM_ID
+#   Windows signing: WINDOWS_CERT (base64 .pfx)
+#                    WINDOWS_CERT_PASSWORD
+# ─────────────────────────────────────────────────────────────────────────────
+
+name: Build & Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*.[0-9]*.[0-9]*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to release (e.g. v1.2.0)'
+        required: true
+
+env:
+  PLUGIN_NAME: CrushClone
+  BUILD_TYPE:  Release
+  # Resolves to inputs.version on manual trigger, git tag on push
+  VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# macOS  →  .pkg
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  build-macos:
+    name: macOS installer (.pkg)
+    runs-on: macos-14          # Apple Silicon; builds Universal Binary via CMAKE_OSX_ARCHITECTURES
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache CMake build dir
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: macos-cmake-${{ hashFiles('**/CMakeLists.txt', '**/CMakePresets.json') }}
+          restore-keys: macos-cmake-
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64" \
+            -DJUCE_BUILD_EXTRAS=OFF \
+            -DJUCE_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel $(sysctl -n hw.logicalcpu)
+
+      # ── Code-signing (skipped when secret is absent) ──────────────────────
+      - name: Import Developer ID certificate
+        if: ${{ secrets.APPLE_DEVELOPER_ID_CERT != '' }}
+        env:
+          CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
+          CERT_PWD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          echo "$CERT_P12" | base64 --decode -o "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "ci-ephemeral" "$KEYCHAIN"
+          security default-keychain -s "$KEYCHAIN"
+          security unlock-keychain -p "ci-ephemeral" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/cert.p12" -k "$KEYCHAIN" \
+            -P "$CERT_PWD" -T /usr/bin/codesign -T /usr/bin/pkgbuild -T /usr/bin/productbuild
+          security set-key-partition-list -S apple-tool:,apple: -s -k "ci-ephemeral" "$KEYCHAIN"
+          rm "$RUNNER_TEMP/cert.p12"
+
+      - name: Sign plugin bundles
+        if: ${{ secrets.APPLE_DEVELOPER_ID_CERT != '' }}
+        env:
+          TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          BASE="build/${{ env.PLUGIN_NAME }}_artefacts/${{ env.BUILD_TYPE }}"
+          for bundle in \
+            "$BASE/VST3/${{ env.PLUGIN_NAME }}.vst3" \
+            "$BASE/AU/${{ env.PLUGIN_NAME }}.component"; do
+            if [ -e "$bundle" ]; then
+              codesign --force --deep --strict --timestamp --options runtime \
+                --sign "Developer ID Application: $TEAM_ID" "$bundle"
+              echo "✔ Signed: $bundle"
+            fi
+          done
+
+      # ── Package ───────────────────────────────────────────────────────────
+      - name: Create .pkg installer
+        run: bash .github/scripts/create-pkg.sh "${{ env.VERSION }}"
+
+      # ── Notarize (skipped when secret is absent) ──────────────────────────
+      - name: Notarize .pkg
+        if: ${{ secrets.APPLE_ID != '' }}
+        env:
+          APPLE_ID:           ${{ secrets.APPLE_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID:      ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          PKG=$(ls dist/${{ env.PLUGIN_NAME }}-*-macOS.pkg | head -1)
+          echo "Notarizing: $PKG"
+          xcrun notarytool submit "$PKG" \
+            --apple-id      "$APPLE_ID" \
+            --password      "$APPLE_APP_PASSWORD" \
+            --team-id       "$APPLE_TEAM_ID" \
+            --wait
+          xcrun stapler staple "$PKG"
+          echo "✔ Notarized and stapled."
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-installer
+          path: dist/${{ env.PLUGIN_NAME }}-*-macOS.pkg
+          if-no-files-found: error
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Windows  →  .exe
+# ─────────────────────────────────────────────────────────────────────────────
+  build-windows:
+    name: Windows installer (.exe)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Cache CMake build dir
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: windows-cmake-${{ hashFiles('**/CMakeLists.txt', '**/CMakePresets.json') }}
+          restore-keys: windows-cmake-
+
+      - name: Configure
+        run: |
+          cmake -B build `
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} `
+            -DJUCE_BUILD_EXTRAS=OFF `
+            -DJUCE_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} --parallel
+
+      # ── Optional: sign the VST3 DLL ───────────────────────────────────────
+      - name: Sign VST3 DLL
+        if: ${{ secrets.WINDOWS_CERT != '' }}
+        shell: pwsh
+        env:
+          CERT_PFX: ${{ secrets.WINDOWS_CERT }}
+          CERT_PWD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP\cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX))
+          $dll = "build\${{ env.PLUGIN_NAME }}_artefacts\${{ env.BUILD_TYPE }}\VST3\" +
+                 "${{ env.PLUGIN_NAME }}.vst3\Contents\x86_64-win\${{ env.PLUGIN_NAME }}.dll"
+          & signtool sign /f $pfx /p $env:CERT_PWD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 $dll
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+          Remove-Item $pfx
+          Write-Host "✔ Signed VST3 DLL"
+
+      # ── Package ───────────────────────────────────────────────────────────
+      - name: Install NSIS
+        run: choco install nsis --yes --no-progress
+
+      - name: Create .exe installer
+        shell: pwsh
+        run: |
+          $repoRoot = (Get-Location).Path
+          $version  = "${{ env.VERSION }}".TrimStart('v')
+          New-Item -ItemType Directory -Force dist | Out-Null
+          & "C:\Program Files (x86)\NSIS\makensis.exe" `
+              "/DVERSION=$version" `
+              "/DPLUGIN_NAME=${{ env.PLUGIN_NAME }}" `
+              "/DBUILD_TYPE=${{ env.BUILD_TYPE }}" `
+              "/DREPO_ROOT=$repoRoot" `
+              .github\scripts\installer.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed with exit $LASTEXITCODE" }
+
+      # ── Optional: sign the installer EXE ─────────────────────────────────
+      - name: Sign installer
+        if: ${{ secrets.WINDOWS_CERT != '' }}
+        shell: pwsh
+        env:
+          CERT_PFX: ${{ secrets.WINDOWS_CERT }}
+          CERT_PWD: ${{ secrets.WINDOWS_CERT_PASSWORD }}
+        run: |
+          $pfx = "$env:RUNNER_TEMP\cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:CERT_PFX))
+          $exe = Get-ChildItem dist\${{ env.PLUGIN_NAME }}-*-Windows.exe | Select-Object -First 1
+          & signtool sign /f $pfx /p $env:CERT_PWD /fd SHA256 `
+              /tr http://timestamp.digicert.com /td SHA256 $exe.FullName
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed" }
+          Remove-Item $pfx
+          Write-Host "✔ Signed installer: $($exe.Name)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist\${{ env.PLUGIN_NAME }}-*-Windows.exe
+          if-no-files-found: error
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Publish both installers to the PUBLIC doxiedevops/CrushClone-releases repo
+# ─────────────────────────────────────────────────────────────────────────────
+  publish:
+    name: Publish public release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Verify artifacts
+        run: ls -lh dist/
+
+      - name: Write release notes
+        run: |
+          VERSION="${{ env.VERSION }}"
+          cat > /tmp/release-notes.md << EOF
+          ## CrushClone ${VERSION}
+
+          ### Downloads
+          | Platform | Formats | Installer |
+          |----------|---------|-----------|
+          | macOS 10.15 Catalina+ (Universal: arm64 + x86_64) | VST3 · AU (v2) | \`CrushClone-${VERSION}-macOS.pkg\` |
+          | Windows 10+ (64-bit) | VST3 | \`CrushClone-${VERSION}-Windows.exe\` |
+
+          ### Installation
+          - **macOS** — open the \`.pkg\` and follow the wizard; VST3 is installed to
+            \`/Library/Audio/Plug-Ins/VST3\` and AU to \`/Library/Audio/Plug-Ins/Components\`
+          - **Windows** — run the \`.exe\` as Administrator; VST3 is installed to
+            \`C:\\Program Files\\Common Files\\VST3\`
+          EOF
+
+      - name: Create release on public repo
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+        run: |
+          gh release create "${{ env.VERSION }}" \
+            --repo  doxiedevops/CrushClone-releases \
+            --title "CrushClone ${{ env.VERSION }}" \
+            --notes-file /tmp/release-notes.md \
+            dist/*
