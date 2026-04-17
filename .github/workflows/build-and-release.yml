@@ -47,6 +47,9 @@ jobs:
   build-macos:
     name: macOS installer (.pkg)
     runs-on: macos-14          # Apple Silicon; builds Universal Binary via CMAKE_OSX_ARCHITECTURES
+    env:
+      HAS_APPLE_CERT: ${{ secrets.APPLE_DEVELOPER_ID_CERT != '' }}
+      HAS_APPLE_NOTARIZE: ${{ secrets.APPLE_ID != '' }}
 
     steps:
       - name: Checkout (with submodules)
@@ -74,7 +77,7 @@ jobs:
 
       # ── Code-signing (skipped when secret is absent) ──────────────────────
       - name: Import Developer ID certificate
-        if: ${{ secrets.APPLE_DEVELOPER_ID_CERT != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         env:
           CERT_P12: ${{ secrets.APPLE_DEVELOPER_ID_CERT }}
           CERT_PWD: ${{ secrets.APPLE_DEVELOPER_ID_CERT_PASSWORD }}
@@ -90,7 +93,7 @@ jobs:
           rm "$RUNNER_TEMP/cert.p12"
 
       - name: Sign plugin bundles
-        if: ${{ secrets.APPLE_DEVELOPER_ID_CERT != '' }}
+        if: ${{ env.HAS_APPLE_CERT == 'true' }}
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
@@ -111,7 +114,7 @@ jobs:
 
       # ── Notarize (skipped when secret is absent) ──────────────────────────
       - name: Notarize .pkg
-        if: ${{ secrets.APPLE_ID != '' }}
+        if: ${{ env.HAS_APPLE_NOTARIZE == 'true' }}
         env:
           APPLE_ID:           ${{ secrets.APPLE_ID }}
           APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
@@ -140,6 +143,8 @@ jobs:
   build-windows:
     name: Windows installer (.exe)
     runs-on: windows-latest
+    env:
+      HAS_WINDOWS_CERT: ${{ secrets.WINDOWS_CERT != '' }}
 
     steps:
       - name: Checkout (with submodules)
@@ -166,7 +171,7 @@ jobs:
 
       # ── Optional: sign the VST3 DLL ───────────────────────────────────────
       - name: Sign VST3 DLL
-        if: ${{ secrets.WINDOWS_CERT != '' }}
+        if: ${{ env.HAS_WINDOWS_CERT == 'true' }}
         shell: pwsh
         env:
           CERT_PFX: ${{ secrets.WINDOWS_CERT }}
@@ -202,7 +207,7 @@ jobs:
 
       # ── Optional: sign the installer EXE ─────────────────────────────────
       - name: Sign installer
-        if: ${{ secrets.WINDOWS_CERT != '' }}
+        if: ${{ env.HAS_WINDOWS_CERT == 'true' }}
         shell: pwsh
         env:
           CERT_PFX: ${{ secrets.WINDOWS_CERT }}
