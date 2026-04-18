@@ -34,6 +34,9 @@ on:
         description: 'Version tag to release (e.g. v1.2.0)'
         required: true
 
+permissions:
+  contents: write
+
 env:
   PLUGIN_NAME: CrushClone
   BUILD_TYPE:  Release
@@ -268,10 +271,10 @@ jobs:
 
       - name: Create release on public repo
         env:
-          GH_TOKEN: ${{ secrets.RELEASES_PAT }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "${{ env.VERSION }}" \
-            --repo  doxiedevops/CrushClone-releases \
+            --repo  doxiedevops/CrushClone \
             --title "CrushClone ${{ env.VERSION }}" \
             --notes-file /tmp/release-notes.md \
             dist/*
